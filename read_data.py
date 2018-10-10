@@ -9,7 +9,6 @@ import tensorflow as tf
 import random
 from tensorflow.contrib import rnn
 
-current_data = []
 # Parameters
 learning_rate = 0.001
 training_steps = 10000
@@ -17,7 +16,7 @@ display_step = 20
 num_hidden = 128
 num_input = 5
 timesteps = 125
-batch_size = 1
+batch_size = 32
 num_classes = 2
 
 # tf Graph input
@@ -32,34 +31,8 @@ biases = {
     'out': tf.Variable(tf.random_normal([num_classes]))
 }
 
-class St(bt.Strategy):
-    def logdata(self):
-        txt = []
-        txt.append('{}'.format(len(self)))
-        txt.append('{}'.format(self.data.datetime.datetime(0).isoformat()))
-        txt.append('{:.2f}'.format(self.data.open[0]))
-        txt.append('{:.2f}'.format(self.data.high[0]))
-        txt.append('{:.2f}'.format(self.data.low[0]))
-        txt.append('{:.2f}'.format(self.data.close[0]))
-        txt.append('{:.2f}'.format(self.data.volume[0]))
-        # print(','.join(txt))
-        float_stats = []
-        for i in range(2,7):
-        	float_stats.append(float(txt[i]))
-        current_data.append(float_stats)
-
-    data_live = False
-    def notify_data(self, data, status, *args, **kwargs):
-        print('*' * 5, 'DATA NOTIF:', data._getstatusname(status), *args)
-        if status == data.LIVE:
-            self.data_live = True
-
-    def next(self):
-        self.logdata()
-
 
 def RNN(x, weights, biases):
-
     # Prepare data shape to match `rnn` function requirements
     # Current data input shape: (batch_size, timesteps, n_input)
     # Required shape: 'timesteps' tensors list of shape (batch_size, n_input)
@@ -76,34 +49,24 @@ def RNN(x, weights, biases):
     # Linear activation, using rnn inner loop last output
     return tf.matmul(outputs[-1], weights['out']) + biases['out']
 
+def load_data(csv_file):
+    current_data = []
+    file = open(csv_file)
+    for line in file:
+        line_stats = []
+        split_line = line.split(";", 7)
+        for i in range(2, 7):
+            line_stats.append(float(split_line[i].strip("\n")))
+        current_data.append(line_stats)
+    return current_data 
+
 def run(args=None):
-    cerebro = bt.Cerebro(stdstats=False)
-    print('Starting Portfolio Value: %.2f' % cerebro.broker.getvalue())
-    
-    # modpath = os.path.dirname(os.path.abspath(sys.argv[0]))
-    # datapath = os.path.join(modpath, './orcl-1995-2014.txt')
-
-    # data = bt.feeds.YahooFinanceCSVData(
-    #     dataname=datapath,
-    #     fromdate=datetime.datetime(1995, 1, 1),
-    #     todate=datetime.datetime(2000, 12, 31),
-    #     reverse=False)
-
-    store = bt.stores.IBStore(port=7497)
-    data = store.getdata(dataname='TWTR',
-                         timeframe=bt.TimeFrame.Ticks)    
-    cerebro.resampledata(data, timeframe=bt.TimeFrame.Seconds,
-                         compression=10)
-
-    cerebro.adddata(data)
-    cerebro.addstrategy(St)
-    cerebro.run()
-
+    current_data = load_data("historical_data/aaba-1m.csv")
     logits = RNN(X, weights, biases)
     prediction = tf.nn.softmax(logits)
 
 	# Define loss and optimizer
-    loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+    loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
         logits=logits, labels=Y))
     optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
     train_op = optimizer.minimize(loss_op)
@@ -121,23 +84,19 @@ def run(args=None):
         sess.run(init)
 
         for step in range(0, training_steps):
-            random_position = random.randint(0, len(current_data)-timesteps-2)
             batch_x = np.zeros((batch_size, timesteps, num_input), dtype=float)
             batch_y = np.zeros((batch_size, num_classes), dtype=int)
-            for i in range(random_position, random_position+timesteps):
-                batch_x[0][i-random_position][0] = current_data[i][0]
-                batch_x[0][i-random_position][1] = current_data[i][1]
-                batch_x[0][i-random_position][2] = current_data[i][2]
-                batch_x[0][i-random_position][3] = current_data[i][3]
-                batch_x[0][i-random_position][4] = current_data[i][4]
-                if i == random_position+timesteps-1:
-                    if batch_x[0][i-random_position][3] < current_data[i+1][3]:
-                        batch_y[0][1] = 1
-                    else:
-                        batch_y[0][0] = 1
-
+            for batch in range(0, batch_size):
+                random_position = random.randint(0, len(current_data)-timesteps-2)
+                for i in range(random_position, random_position+timesteps):
+                    batch_x[batch][i-random_position] = current_data[i]
+                    if i == random_position+timesteps-1:
+                        if batch_x[batch][i-random_position][3] < current_data[i+1][3]:
+                            batch_y[batch][1] = 1
+                        else:
+                            batch_y[batch][0] = 1
             batch_x = batch_x.reshape((batch_size, timesteps, num_input))
-            sess.run(train_op, feed_dict={X: batch_x, Y: batch_y})
+            train, pred = sess.run(train_op, feed_dict={X: batch_x, Y: batch_y})
             if step % display_step == 0 or step == 1:
                 # Calculate batch loss and accuracy
                 loss, acc = sess.run([loss_op, accuracy], feed_dict={X: batch_x,
